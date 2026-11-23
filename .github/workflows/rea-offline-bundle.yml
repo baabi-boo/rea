@@ -1,0 +1,77 @@
+name: REA offline Linux bundle
+on:
+  push:
+    branches: [rea-offline-bundle]
+    paths:
+      - .github/workflows/rea-offline-bundle.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      HUSKY: "0"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install locked source dependencies
+        run: |
+          set -euo pipefail
+          npm_version="$(node -p 'require("./package.json").packageManager.split("@").pop()')"
+          if [ "$(npm -v)" != "$npm_version" ]; then npm install -g "npm@$npm_version"; fi
+          node --version
+          npm --version
+          npm ci --no-audit --no-fund
+      - name: Build and package exact fork revision
+        run: |
+          set -euo pipefail
+          npm run build:cached
+          npm pack --pack-destination "$RUNNER_TEMP"
+      - name: Stage portable runtime and package
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          bundle="$RUNNER_TEMP/rea-offline"
+          mkdir -p "$bundle/bin" "$bundle/app"
+          install -m 755 "$(readlink -f "$(command -v node)")" "$bundle/bin/node"
+          cd "$bundle/app"
+          npm init -y >/dev/null
+          npm install --omit=dev --no-audit --no-fund --save-exact "$RUNNER_TEMP/rea-agents-$version.tgz"
+          cat > "$bundle/bin/rea" <<'SH'
+          #!/usr/bin/env sh
+          set -eu
+          BASE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+          exec "$BASE/bin/node" "$BASE/app/node_modules/rea-agents/scripts/rea.mjs" "$@"
+          SH
+          chmod 755 "$bundle/bin/rea"
+          "$bundle/bin/rea" --help > "$bundle/cli-help.txt"
+          test -s "$bundle/cli-help.txt"
+          "$bundle/bin/node" --version > "$bundle/node-version.txt"
+          printf '%s\n' "$GITHUB_SHA" > "$bundle/source-commit.txt"
+          cat > "$bundle/README.txt" <<'TXT'
+          Extract the tar.gz and run ./rea-offline/bin/rea --help.
+          For a local MCP client use ./rea-offline/bin/rea mcp via stdio.
+          Native decompilers and external analysis engines are not bundled.
+          No client configuration or provider installation is performed.
+          TXT
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/rea-offline-linux-x64.tar.gz" rea-offline
+          cd "$RUNNER_TEMP"
+          sha256sum rea-offline-linux-x64.tar.gz > rea-offline-linux-x64.tar.gz.sha256
+      - name: Upload offline bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: rea-offline-linux-x64
+          path: |
+            ${{ runner.temp }}/rea-offline-linux-x64.tar.gz
+            ${{ runner.temp }}/rea-offline-linux-x64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
